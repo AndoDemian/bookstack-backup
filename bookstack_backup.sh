@@ -1,67 +1,97 @@
 #!/usr/bin/env bash
+#
+# This script automates the backup of BookStack, including database
+# and files, with cleanup and secure permission setting for the backups.
+#
+# Author: Ando Demian <andodemian@outlook.com>
+# Version: 2.0
+# Created: February 15, 2022
+# License: MIT
 
-# Global vars
-BACKUP_LOCATION="/opt/backup/"
-LOG_NAME="bookstack_backup"
 
-# Global functions
-_logger() {
-    local now=$(date +"%Y-%m-%d %H:%M:%S")
-    echo "$now: $@" | tee -a ${BACKUP_LOCATION}/${LOG_NAME}_$(date +%Y-%m-%d_%H-%M).log
+# --- Global Configuration ---
+# BACKUP_LOCATION: Path to store the backups.
+BACKUP_LOCATION="/opt/backup"
+LOG_FILE="${BACKUP_LOCATION}/bookstack_backup_$(date +%Y-%m-%d).log"
+# Database credentials
+DB_USER="USER"
+DB_PASSWORD="PASS"
+DB_HOST="HOST"
+DB_NAME="bookstack"
+# HTML_PATH: Path to the Bookstack installation directory.
+HTML_PATH="/var/www"
+HTML_FOLDER="bookstack"
+# KEEP_DAYS: Number of days to retain backups. Older files will be deleted.
+KEEP_DAYS=10
+
+# --- Logging ---
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "${timestamp} [${level}] ${message}" | tee -a "${LOG_FILE}"
 }
 
-_check_error() {
-    if [[ $? -ne 0 ]]; then
-        local ERROR_MESSAGE="$1"
-        _logger "${ERROR_MESSAGE}"
+info() { log "INFO" "$1"; }
+error() { log "ERROR" "$1"; exit 1; }
+success() { log "SUCCESS" "$1"; }
+
+# --- Helpers ---
+ensure_backup_location() {
+    if [[ ! -d "${BACKUP_LOCATION}" ]]; then
+        mkdir -p "${BACKUP_LOCATION}" || error "Failed to create backup location: ${BACKUP_LOCATION}"
     fi
 }
 
-# Let the backups begin !
-_backup_database() {
-    USER="USER"
-    PASSWORD="PASS"
-    HOST="HOST"
-    DATABASE_NAME="bookstack"
-    DUMP_ARGS="--force --no-tablespaces --no-autocommit --add_locks --disable_keys --extended-insert --quick --single-transaction"
-    DUMP_NAME="bookstack_db_$(date +%Y-%m-%d_%H-%M).sql"
-
-    export MYSQL_PWD="${PASSWORD}"
-    mysqldump ${DUMP_ARGS} -u "${USER}" -h"${HOST}" "${DATABASE_NAME}" > "${BACKUP_LOCATION}"/"${DUMP_NAME}"
-    _check_error "Error with the MySQL Dump!"
-
-    if [[ -f "${BACKUP_LOCATION}"/"${DUMP_NAME}" ]]; then
-        gzip "${BACKUP_LOCATION}"/"${DUMP_NAME}"
-        _check_error "Error archiving the MySQL Dump!"
-    fi
+cleanup_old_backups() {
+    info "Cleaning up backups older than ${KEEP_DAYS} days..."
+    find "${BACKUP_LOCATION}" -type f \( -name "*.gz" -o -name "*.log" \) -mtime +${KEEP_DAYS} -exec rm {} \;
+    success "Old backups cleaned up."
 }
 
-_backup_files() {
-    HTML_PATH="/var/www/"
-    HTML_FOLDER="bookstack"
-
-    cd "${HTML_PATH}"
-    tar -czf "${BACKUP_LOCATION}/bookstack_files_$(date +%Y-%m-%d_%H-%M).tar.gz" "${HTML_FOLDER}"
-    _check_error "Error with the Files backup!"
+set_permissions() {
+    info "Setting secure permissions for backup files..."
+    find "${BACKUP_LOCATION}" -type f -name "*.gz" -exec chmod 400 {} \;
+    success "Permissions set."
 }
 
-_permissions() {
-    find "${BACKUP_LOCATION}" -name "*.gz" -exec chmod 400 {} \;
+# --- Backup Functions ---
+backup_database() {
+    local dump_file="${BACKUP_LOCATION}/bookstack_db_$(date +%Y-%m-%d_%H-%M).sql.gz"
+
+    info "Starting MySQL database backup..."
+    export MYSQL_PWD="${DB_PASSWORD}"
+    mysqldump --no-tablespaces --no-autocommit --add_locks --disable_keys \
+              --extended-insert --quick --single-transaction \
+              -u "${DB_USER}" -h "${DB_HOST}" "${DB_NAME}" | gzip > "${dump_file}" || error "Database backup failed."
+
+    success "Database backup completed: ${dump_file}"
 }
 
-_clean_up() {
-    KEEP_DAYS=10
-    find "${BACKUP_LOCATION}"  \( -name "*.gz" -o -name "*.log" \) -daystart -mtime +${KEEP_DAYS} -exec rm {} \;
+backup_files() {
+    local archive_file="${BACKUP_LOCATION}/bookstack_files_$(date +%Y-%m-%d_%H-%M).tar.gz"
+
+    info "Starting file backup..."
+    tar -czf "${archive_file}" -C "${HTML_PATH}" "${HTML_FOLDER}" || error "File backup failed."
+
+    success "File backup completed: ${archive_file}"
 }
 
+# --- Main Execution ---
+main() {
+    local start_time=$SECONDS
+    ensure_backup_location
+    info "Backup process started."
 
-_logger "Starting backup ..."
-_logger "Backup database ..."
-_backup_database
-_logger "Backup Files ..."
-_backup_files
-_logger "Setting permissions ..."
-_permissions
-_logger "Cleaning up ..."
-_clean_up
-_logger "The script took $SECONDS seconds."
+    backup_database
+    backup_files
+    set_permissions
+    cleanup_old_backups
+
+    local duration=$((SECONDS - start_time))
+    success "Backup process completed in ${duration} seconds."
+}
+
+# --- Run Script ---
+main "$@"
